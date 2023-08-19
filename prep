@@ -1,0 +1,215 @@
+#!/bin/bash
+
+## 입력 파일
+reference_fa="input/hg19.fa"
+gene_list="input/genelist"
+bed_file="input/hg19.ucsc.bed"
+bed_target="workdir/target.bed"
+mane="input/MANE.txt"
+raw_bam="input/source.bam"
+clinvar_vcf_gz="input/clinvar.vcf.gz"
+
+## 출력 파일
+snv_sorted_bam="output/snv.sorted.bam"
+snv_vcf="output/snv.vcf"
+indel_sorted_bam="output/indel.sorted.bam"
+indel_vcf="output/indel.vcf"
+final_bam="output/mutated.bam"
+final_vcf="output/mutation.called_from_bam.vcf"
+fastq1_repair="output/mutated_R1.clean.fastq"
+fastq2_repair="output/mutated_R2.clean.fastq"
+
+## 중간 파일
+fastq1="workdir/mutated_R1.fastq"
+fastq2="workdir/mutated_R2.fastq"
+snv_bam="workdir/snv.bam"
+indel_bam="workdir/indel.bam"
+fastq_singleton="mutated_singleton.fastq"
+temp_vcf="workdir/temp.vcf"
+snv_mut="workdir/snv.mut"
+indel_mut="workdir/indel.mut"
+clinvar_snv_output="workdir/clinvar.snv.tsv"
+clinvar_indel_output="workdir/clinvar.indel.tsv"
+regional_bam="workdir/source.regions.bam"
+mane_essential="workdir/mane.tsv"
+mane_target="workdir/mane_target.tsv"
+snv_rand="workdir/snv.rand"
+indel_rand="workdir/indel.rand"
+bed_temp="workdir/temp.bed"
+threads=`cat /proc/cpuinfo | grep cores | wc -l`
+#threads=1
+
+BLUE='\033[0;34m'
+WHITE='\033[0;37m' 
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+DEFC='\033[0m'
+
+function make_bed() {
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  echo -e "${GREEN}${gene_list} 파일에 저장된 유전자에 대한 BED 파일을 생성합니다.${DEFC}"
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  
+  if [ ! -e ${gene_list} ]; then
+    echo -e "${RED}[오류] ${gene_list} 파일을 찾을 수 없습니다.${DEFC}"
+    return -1
+  fi
+
+  if [ ! -e ${mane} ]; then
+    echo -e "${RED}[오류] ${mane} 파일을 찾을 수 없습니다.${DEFC}"
+    return -1
+  fi
+
+  if [ ! -e ${bed_file} ]; then
+    echo -e "${RED}[오류] ${bed_file} 파일을 찾을 수 없습니다.${DEFC}"
+    return -1
+  fi
+
+  gawk -v OFS='\t' -F '\t' '$10=="MANE Select" || $10=="MANE Plus Clinical" {print $4,$6,$10}' ${mane} > ${mane_essential}
+  readarray -t arr_gene < ${gene_list}
+  regex_gene=`(read -r -a tmp_gene <<< $(echo "${arr_gene[*]/#/^}"); IFS='|'; echo "${tmp_gene[*]/%/$}")`
+  gawk -v OFS='\t' -v rx="${regex_gene}" -F '\t' '$1 ~ rx {print $2}' ${mane_essential} > ${mane_target} 
+  readarray -t mane_tx < ${mane_target}
+  regex_tx=`IFS='|'; (echo "${mane_tx[*]}")`
+  gawk -v OFS='\t' -v tx="${regex_tx}" -F '\t' '$2 ~ tx {print $3,$5,$6,$13,$12,$4}' ${bed_file} > ${bed_temp}
+  gawk -v OFS='\t' -v tx="^chr[0-9XY]+$" -F '\t' '$1 ~ tx {print $0}' ${bed_temp} > ${bed_target}
+}
+
+function prepare_bam() {
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  echo -e "${GREEN}${bed_target} 을 기준으로 BAM 파일의 용량을 줄입니다.${DEFC}"
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  if [ -e ${regional_bam} ]; then
+    echo "${regional_bam} 파일이 존재합니다. 다음 단계로 넘어갑니다."
+    return 0
+  fi
+
+  if [ ! -e ${raw_bam} ]; then
+    echo -e "${RED}[오류] ${raw_bam} 파일을 찾을 수 없습니다.${DEFC}"
+    return -1
+  fi
+
+  if [ ! -e ${bed_target} ]; then
+    echo -e "${RED}[오류] ${bed_target} 파일을 찾을 수 없습니다.${DEFC}"
+    return -1
+  fi
+
+  if [ ! -e ${raw_bam} ]; then
+    echo -e "${RED}[오류] ${raw_target} 파일을 찾을 수 없습니다.${DEFC}"
+    return -1
+  fi
+
+  samtools view -@${threads} -bh -L ${bed_target} -o ${regional_bam} ${raw_bam}
+  samtools index -@${threads} ${regional_bam}
+}
+
+function prepare_pathogenic_variants_from_clinvar() {
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  echo -e "${GREEN}>>>> ClinVar VCF에서 Pathogenic SNV를 추출합니다.${DEFC}"
+  echo -e "${WHITE}Review status가 별 2개 이상인 것으로 제한합니다.${DEFC}"
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  readarray -t arr_gene < ${gene_list}
+  echo -e "대상 유전자 목록: ${arr_gene[*]}"
+  zcat ${clinvar_vcf_gz} | ( IFS='|'; grep -E "(GENEINFO=${arr_gene[*]}:)" ) | gawk -v OFS='\t' -F '\t' '/^(([0-9]{1,2}|X|Y|MT)|#CHROM)/ { if($5!="N" && $5!="." && match($8, /CLNHGVS=.*?:(g\..*?);CLNREVSTAT=(criteria_provided,_multiple_submitters,_no_conflicts|reviewed_by_expert_panel|practice_guideline).*?CLNSIG=(Pathogenic).*?CLNVC=(single_nucleotide_variant).*?GENEINFO=([A-Za-z\-0-9]+)/, m)) {print m[5],$1,$2,$4,$5,m[4],m[3],m[2],"chr"$1":"m[1]}}' > ${clinvar_snv_output}
+  echo -e "${clinvar_snv_output} 에 저장되었습니다."
+  echo -e "저장된 파일의 첫 5행:"
+  head -n 5 ${clinvar_snv_output}
+  echo
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  echo -e "${GREEN}>>>> ClinVar VCF에서 Pathogenic INDEL을 추출합니다.${DEFC}"
+  echo -e "${WHITE}Review status가 별 2개 이상인 것으로 제한합니다.${DEFC}"
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  echo -e "대상 유전자 목록: ${arr_gene[*]}"
+  zcat ${clinvar_vcf_gz} | ( IFS='|'; grep -E "(GENEINFO=${arr_gene[*]}:)" ) | gawk -v OFS='\t' -F '\t' '/^(([0-9]{1,2}|X|Y|MT)|#CHROM)/ { if(match($8, /CLNHGVS=.*?:(g\..*?);CLNREVSTAT=(criteria_provided,_multiple_submitters,_no_conflicts|reviewed_by_expert_panel|practice_guideline).*?CLNSIG=(Pathogenic).*?CLNVC=(Deletion|Duplication|Insertion).*?GENEINFO=([A-Za-z\-0-9]+)/, m)) {print m[5],$1,$2,$4,$5,m[4],m[3],m[2],"chr"$1":"m[1]}}' > ${clinvar_indel_output}
+  echo -e "${clinvar_indel_output} 에 저장되었습니다."
+  echo -e "저장된 파일의 첫 5행:"
+  head -n 5 ${clinvar_indel_output}
+  echo
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  echo -e "${GREEN}>>>> Mutation (SNV) 파일을 생성합니다.${DEFC}"
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  if [ -e ${snv_rand} ]; then rm -rf ${snv_rand}; fi; 
+  touch ${snv_rand}
+  for gene in "${arr_gene[@]}"
+  do
+    grep ${gene} ${clinvar_snv_output} | shuf -n 1 >> ${snv_rand} 
+  done
+  gawk -v OFS='\t' -v rseed=$RANDOM -v min=40 -v max=60 -F '\t' 'BEGIN{srand(rseed);} {if(rand()<0.6) {print "chr"$2,$3,$3,(min+rand()*(max-min+1))/100,$5} else {print "chr"$2,$3,$3,1.0,$5}}' ${snv_rand} > ${snv_mut}
+  echo -e "${snv_mut} 에 저장되었습니다."
+  echo -e "저장된 파일의 첫 5행:"
+  head -n 5 ${snv_mut}
+  echo
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  echo -e "${GREEN}>>>> Mutation (INDEL) 파일을 생성합니다.${DEFC}"
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  if [ -e ${indel_rand} ]; then rm -rf ${indel_rand}; fi; 
+  touch ${indel_rand}
+  for gene in "${arr_gene[@]}"
+  do
+    grep ${gene} ${clinvar_indel_output} | shuf -n 1 >> ${indel_rand} 
+  done
+  gawk -v OFS='\t' -v rseed=$RANDOM -v min=40 -v max=60 -F '\t' 'BEGIN{srand(rseed);} {gsub("Deletion","DEL",$6);gsub("Insertion","INS",$6);gsub("Duplication","INS",$6);if(rand()<0.6) {if($6=="DEL") {print "chr"$2,$3+1,$3+length($4),(min+rand()*(max-min+1))/100,$6} else {print "chr"$2,$3,$3+1,(min+rand()*(max-min+1))/100,$6,substr($5,2)}} else {if($6=="DEL") { print "chr"$2,$3+1,$3+length($4),1.0,$6} else {print "chr"$2,$3,$3+1,1.0,$6,substr($5,2)}}}' ${indel_rand} > ${indel_mut}
+  echo -e "${indel_mut} 에 저장되었습니다."
+  echo -e "저장된 파일의 첫 5행:"
+  head -n 5 ${indel_mut}
+}
+
+function mutagenesis() {
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  echo -e "${GREEN}>>>> BAM에 mutation을 주입합니다.${DEFC}"
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  echo -e ">>>> SNV Mutagenesis를 시작합니다."
+  if [ ! -e ${snv_sorted_bam} ]; then
+    python3 bamsurgeon/bin/addsnv.py -p ${threads} --tmpdir workdir -v ${snv_mut} -f ${regional_bam} -r ${reference_fa} -o ${snv_bam} --picardjar picard-tools-1.131/picard.jar --mindepth 30 --aligner mem --requirepaired --vcf ${snv_vcf}
+    echo -e ">>>> Mutated BAM (SNV)을 정렬합니다."
+    samtools sort -@${threads} -O BAM -o ${snv_sorted_bam} ${snv_bam}
+    echo -e ">>>> Mutated BAM (SNV)의 index를 생성합니다."
+    samtools index -@${threads} ${snv_sorted_bam}
+  else
+    echo -e "${snv_sorted_bam}이 존재합니다. 다음 단계로 넘어갑니다."
+  fi
+
+  echo -e ">>>> INDEL Mutagenesis를 시작합니다."
+  if [ ! -e ${final_bam} ]; then
+    python3 bamsurgeon/bin/addindel.py -p ${threads} --tmpdir workdir -v ${indel_mut} -f ${snv_sorted_bam} -r ${reference_fa} -o ${indel_bam} --picardjar picard-tools-1.131/picard.jar --mindepth 30 --aligner mem --requirepaired --vcf ${snv_vcf}
+    echo -e ">>>> Mutated BAM (INDEL)을 정렬합니다."
+    samtools sort -@${threads} -O BAM -o ${indel_sorted_bam} ${indel_bam}
+    echo -e ">>>> Mutated BAM (INDEL)의 index를 생성합니다."
+    samtools index -@${threads} ${indel_sorted_bam}
+    cp ${indel_sorted_bam} ${final_bam}
+    samtools index -@${threads} ${final_bam}
+  else
+    echo -e "${final_bam}이 존재합니다. 다음 단계로 넘어갑니다."
+  fi
+
+  bcftools mpileup -a "AD,ADF,ADR,DP,SP,INFO/AD,INFO/ADF,INFO/ADR" -Ou -R ${bed_target} --threads ${threads} -f ${reference_fa} ${final_bam} | bcftools call -mv -Ov -o ${temp_vcf} --ploidy GRCh37 --threads ${threads}
+  bcftools norm -c w -f ${reference_fa} -m -any -Ov -o ${final_vcf} --threads ${threads} ${temp_vcf}
+}
+
+function make_fastq() {
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  echo -e "${GREEN}>>>> BAM을 fastq로 변환합니다.${DEFC}"
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  if [ ! -e ${final_bam} ]; then
+    echo -e "${RED}[오류] ${final_bam} 파일이 존재하지 않습니다.${DEFC}"
+    return -1
+  fi
+  
+  if [ -e ${fastq1} ] && [ -e ${fastq2} ]; then
+    echo -e "${fastq1} 및 ${fastq2} 파일이 존재합니다. 건너뜁니다."
+    return 0
+  fi
+
+  samtools fastq -@${threads} -1 ${fastq1} -2 ${fastq2} -0 /dev/null -n -F 0x900 ${final_bam}
+  /usr/share/bbmap/repair.sh in1=${fastq1} in2=${fastq2} out1=${fastq1_repair} out2=${fastq2_repair} outs=${fastq_singleton} repair
+  gzip ${fastq1_repair}
+  gzip ${fastq2_repair}  
+}
+
+make_bed
+prepare_bam
+prepare_pathogenic_variants_from_clinvar
+mutagenesis
+make_fastq
+
+echo -e ">>>> 종료."
