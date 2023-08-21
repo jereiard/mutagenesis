@@ -7,6 +7,7 @@ bed_file="/app/input/hg19.ucsc.bed"
 mane="/app/input/MANE.txt"
 raw_bam="/app/input/source.bam"
 clinvar_vcf_gz="/app/input/clinvar.vcf.gz"
+igv_session_template="/app/input/igv_session.xml"
 
 ## 출력 파일
 snv_sorted_bam="/app/output/snv.sorted.bam"
@@ -40,6 +41,7 @@ bed_temp="/app/workdir/temp.bed"
 input_mut_bed="/app/workdir/input.mut.bed"
 igv_batch="/app/workdir/igv.batch"
 threads=`cat /proc/cpuinfo | grep cores | wc -l`
+igv_session="/app/workdir/igv.xml"
 #threads=1
 
 BLUE='\033[0;34m'
@@ -192,7 +194,7 @@ function mutagenesis() {
 
   echo -e "${GREEN}>>>> INDEL Mutagenesis를 시작합니다.${DEFC}"
   if [ ! -e ${final_bam} ]; then
-    python3 bamsurgeon/bin/addindel.py -p ${threads} --tmpdir workdir -v ${indel_mut} -f ${snv_sorted_bam} -r ${reference_fa} -o ${indel_bam} --picardjar picard-tools-1.131/picard.jar --mindepth 30 --aligner mem --requirepaired --vcf ${snv_vcf}
+    python3 bamsurgeon/bin/addindel.py -p ${threads} --tmpdir workdir -v ${indel_mut} -f ${snv_sorted_bam} -r ${reference_fa} -o ${indel_bam} --picardjar picard-tools-1.131/picard.jar --mindepth 30 --aligner mem --requirepaired --vcf ${indel_vcf}
     echo -e "${GREEN}>>>> Mutated BAM (INDEL)을 정렬합니다.${DEFC}"
     samtools sort -@${threads} -O BAM -o ${indel_sorted_bam} ${indel_bam}
     echo -e "${GREEN}>>>> Mutated BAM (INDEL)의 index를 생성합니다.${DEFC}"
@@ -232,12 +234,41 @@ function make_fastq() {
 }
 
 function make_screenshot() {
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  echo -e "${GREEN}>>>> ClinVar에서 생성했던 target mutation에 대해 IGV 캡쳐를 작성합니다.${DEFC}"
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  
+  if [ ! -e ${final_bam} ]; then
+    echo -e "${RED}[오류] ${final_bam} 파일이 존재하지 않습니다.${DEFC}"
+    return -1
+  fi
+
+  if [ ! -e ${final_vcf} ]; then
+    echo -e "${RED}[오류] ${final_vcf} 파일이 존재하지 않습니다.${DEFC}"
+    return -1
+  fi
+
+  if [ ! -e ${snv_mut} ]; then
+    echo -e "${RED}[오류] ${snv_mut} 파일이 존재하지 않습니다.${DEFC}"
+    return -1
+  fi
+  
+  if [ ! -e ${indel_mut} ]; then
+    echo -e "${RED}[오류] ${indel_mut} 파일이 존재하지 않습니다.${DEFC}"
+    return -1
+  fi
+
   cat ${snv_mut} ${indel_mut} | gawk -v OFS='\t' -F '\t' '{print $1,$2,$3}' > ${input_mut_bed}
-  bedtools igv -path ${screenshot_path} -slop 150 -i ${input_mut_bed} > ${igv_batch}
+  bedtools igv -path ${screenshot_path} -slop 50 -i ${input_mut_bed} > ${igv_batch}
+  #echo -e "preference SAM.SHOW_CENTER_LINE true\nmaxPanelHeight -1\ngenome hg19\nload ${final_bam}\nload ${final_vcf}\nload ${snv_vcf}\nload ${indel_vcf}\n$(cat ${igv_batch})\nexit" > ${igv_batch}  
+  cat ${igv_session_template} | sed "s@##SNV_VCF##@${snv_vcf}@g" | sed "s@##INDEL_VCF##@${indel_vcf}@g" | sed "s@##FINAL_VCF##@${final_vcf}@g" | sed "s@##FINAL_BAM##@${final_bam}@g" > ${igv_session}
+  echo -e "preference SAM.SHOW_CENTER_LINE true\nmaxPanelHeight -1\ngenome hg19\nload ${igv_session}\n$(cat ${igv_batch})\nexit" > ${igv_batch}
   if [ ! -e ${screenshot_path} ]; then
     mkdir -p ${screenshot_path}
   fi
-  xvfb-run -a /app/igv/.sh --server-args="-screen 0 2400x3200x24" -b ${igv_batch}
+  echo -e "IGV.Bounds=0,0,2560,1440\nIGV.chart.track.height=80\nSAM.SHOW_SOFT_CLIPPED=true\nIGV.track.height=80" > /app/igv/igv.pref
+  #xvfb-run -a /app/igv/igv.sh --server-args="-screen 0 2400x3200x24" -b ${igv_batch}
+  xvfb-run -a --server-args="-screen 0 2560x1440x24" /app/igv/igv.sh -b ${igv_batch} -o /app/igv/igv.pref
 }
 
 make_bed
@@ -247,4 +278,4 @@ mutagenesis
 make_fastq
 make_screenshot
 
-echo -e "${GREEN}>>>> 종료."
+echo -e "${GREEN}>>>> 종료.${DEFC}"
