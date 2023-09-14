@@ -2,37 +2,52 @@
 
 ## 입력 파일
 reference_fa="/app/input/hg19.fa"
+reference_fa_ir="/app/input/hs37d5.fa"
 gene_list="/app/input/genelist"
 bed_file="/app/input/hg19.ucsc.bed"
 mane="/app/input/MANE.txt"
 raw_bam="/app/input/source.bam"
+raw_bam_ir="/app/input/source_iontorrent.downsample.bam"
 clinvar_vcf_gz="/app/input/clinvar.vcf.gz"
 igv_session_template="/app/input/igv_session.xml"
 
 ## 출력 파일
 snv_sorted_bam="/app/output/snv.sorted.bam"
+snv_sorted_bam_ir="/app/output/snv_ir.sorted.bam"
 snv_vcf="/app/output/snv.vcf"
+snv_vcf_ir="/app/output/snv_ir.sorted.bam"
 indel_sorted_bam="/app/output/indel.sorted.bam"
+indel_sorted_bam_ir="/app/output/indel_ir.sorted.bam"
 indel_vcf="/app/output/indel.vcf"
+indel_vcf_ir="/app/output/indel_ir.vcf"
 final_bam="/app/output/mutated.bam"
+final_bam_ir="/app/output/mutated_ir.bam"
 final_vcf="/app/output/mutation.called_from_bam.vcf"
+final_vcf_ir="/app/output/mutation_ir.called_from_bam.vcf"
 fastq1_repair="/app/output/mutated_R1.clean.fastq"
 fastq2_repair="/app/output/mutated_R2.clean.fastq"
 screenshot_path="/app/output/screenshots"
 
 ## 중간 파일
 bed_target="/app/workdir/target.bed"
+bed_target_nochr="/app/workdir/target.nochr.bed"
 fastq1="/app/workdir/mutated_R1.fastq"
 fastq2="/app/workdir/mutated_R2.fastq"
 snv_bam="/app/workdir/snv.bam"
+snv_bam_ir="/app/workdir/snv_ir.bam"
 indel_bam="/app/workdir/indel.bam"
+indel_bam_ir="/app/workdir/indel_ir.bam"
 fastq_singleton="mutated_singleton.fastq"
 temp_vcf="/app/workdir/temp.vcf"
+temp_vcf_ir="/app/workdir/temp_ir.vcf"
 snv_mut="/app/workdir/snv.mut"
 indel_mut="/app/workdir/indel.mut"
+snv_mut_nochr="/app/workdir/snv.nochr.mut"
+indel_mut_nochr="/app/workdir/indel.nochr.mut"
 clinvar_snv_output="/app/workdir/clinvar.snv.tsv"
 clinvar_indel_output="/app/workdir/clinvar.indel.tsv"
 regional_bam="/app/workdir/source.regions.bam"
+regional_bam_ir="/app/workdir/source_ir.regions.bam"
 mane_essential="/app/workdir/mane.tsv"
 mane_target="/app/workdir/mane_target.tsv"
 snv_rand="/app/workdir/snv.rand"
@@ -55,8 +70,8 @@ function make_bed() {
   echo -e "${GREEN}${gene_list} 파일에 저장된 유전자에 대한 BED 파일을 생성합니다.${DEFC}"
   echo -e "${GREEN}=====================================================================${DEFC}"
   
-  if [ -e ${bed_target} ]; then
-    echo "${bed_target} 파일이 존재합니다. 다음 단계로 넘어갑니다."
+  if [ -e ${bed_target} ] && [ -e ${bed_target_nochr} ]; then
+    echo "${bed_target} 및 ${bed_target_nochr}파일이 존재합니다. 다음 단계로 넘어갑니다."
     return 0
   fi
 
@@ -83,11 +98,12 @@ function make_bed() {
   regex_tx=`IFS='|'; (echo "${mane_tx[*]}")`
   gawk -v OFS='\t' -v tx="${regex_tx}" -F '\t' '$2 ~ tx {print $3,$5,$6,$13,$12,$4}' ${bed_file} > ${bed_temp}
   gawk -v OFS='\t' -v tx="^chr[0-9XY]+$" -F '\t' '$1 ~ tx {print $0}' ${bed_temp} > ${bed_target}
+  gawk -v OFS='\t' -F '\t' '{gsub(/^chr/,"")}1' ${bed_target} > ${bed_target_nochr}
 }
 
 function prepare_bam() {
   echo -e "${GREEN}=====================================================================${DEFC}"
-  echo -e "${GREEN}${bed_target} 을 기준으로 BAM 파일의 용량을 줄입니다.${DEFC}"
+  echo -e "${GREEN}${bed_target} 을 기준으로 BAM 파일의 용량을 줄입니다 (Illumina).${DEFC}"
   echo -e "${GREEN}=====================================================================${DEFC}"
   if [ -e ${regional_bam} ]; then
     echo "${regional_bam} 파일이 존재합니다. 다음 단계로 넘어갑니다."
@@ -104,17 +120,34 @@ function prepare_bam() {
     return -1
   fi
 
-  if [ ! -e ${raw_bam} ]; then
-    echo -e "${RED}[오류] ${raw_target} 파일을 찾을 수 없습니다.${DEFC}"
-    return -1
-  fi
-
   samtools view -@${threads} -bh -L ${bed_target} -o ${regional_bam} ${raw_bam}
   samtools index -@${threads} ${regional_bam}
 }
 
+function prepare_bam_ir() {
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  echo -e "${GREEN}${bed_target} 을 기준으로 BAM 파일의 용량을 줄입니다 (IonTorrent).${DEFC}"
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  if [ -e ${regional_bam_ir} ]; then
+    echo "${regional_bam_ir} 파일이 존재합니다. 다음 단계로 넘어갑니다."
+    return 0
+  fi
+
+  if [ ! -e ${raw_bam_ir} ]; then
+    echo -e "${RED}[오류] ${raw_bam_ir} 파일을 찾을 수 없습니다.${DEFC}"
+    return -1
+  fi
+
+  if [ ! -e ${bed_target_nochr} ]; then
+    echo -e "${RED}[오류] ${bed_target_nochr} 파일을 찾을 수 없습니다.${DEFC}"
+    return -1
+  fi
+  samtools view -@${threads} -bh -L ${bed_target_nochr} -o ${regional_bam_ir} ${raw_bam_ir}
+  samtools index -@${threads} ${regional_bam_ir}
+}
+
 function prepare_pathogenic_variants_from_clinvar() {  
-  if [ ! -e ${snv_mut} ]; then    
+  if [ ! -e ${snv_mut} ] || [ ! -e ${snv_mut_nochr} ]; then    
     echo -e "${GREEN}=====================================================================${DEFC}"
     echo -e "${GREEN}>>>> ClinVar VCF에서 Pathogenic SNV를 추출합니다.${DEFC}"
     echo -e "${WHITE}Review status가 별 2개 이상인 것으로 제한합니다.${DEFC}"
@@ -136,16 +169,17 @@ function prepare_pathogenic_variants_from_clinvar() {
       grep ${gene} ${clinvar_snv_output} | shuf -n 1 >> ${snv_rand} 
     done
     gawk -v OFS='\t' -v rseed=$RANDOM -v min=40 -v max=60 -F '\t' 'BEGIN{srand(rseed);} {if(rand()<0.6) {print "chr"$2,$3,$3,(min+rand()*(max-min+1))/100,$5} else {print "chr"$2,$3,$3,1.0,$5}}' ${snv_rand} > ${snv_mut}
-    echo -e "${snv_mut} 에 저장되었습니다."
+    gawk -v OFS='\t' -F '\t' '{gsub(/^chr/,"")}1' ${snv_mut} > ${snv_mut_nochr}
+    echo -e "${snv_mut} 및 ${snv_mut_nochr}에 저장되었습니다."
     echo -e "저장된 파일의 첫 5행:"
     head -n 5 ${snv_mut}
     echo
   else 
-    echo "${snv_mut} 파일이 존재합니다. 다음 단계로 넘어갑니다."
+    echo "${snv_mut} 및 ${snv_mut_nochr} 파일이 존재합니다. 다음 단계로 넘어갑니다."
     return 0
   fi 
 
-  if [ ! -e ${indel_mut} ]; then    
+  if [ ! -e ${indel_mut} ] || [ ! -e ${indel_mut_nochr} ]; then    
     echo
     echo -e "${GREEN}=====================================================================${DEFC}"
     echo -e "${GREEN}>>>> ClinVar VCF에서 Pathogenic INDEL을 추출합니다.${DEFC}"
@@ -166,20 +200,21 @@ function prepare_pathogenic_variants_from_clinvar() {
     do
       grep ${gene} ${clinvar_indel_output} | shuf -n 1 >> ${indel_rand} 
     done
-    gawk -v OFS='\t' -v rseed=$RANDOM -v min=40 -v max=60 -F '\t' 'BEGIN{srand(rseed);} {gsub("Deletion","DEL",$6);gsub("Insertion","INS",$6);gsub("Duplication","INS",$6);if(rand()<0.6) {if($6=="DEL") {print "chr"$2,$3+1,$3+length($4),(min+rand()*(max-min+1))/100,$6} else {print "chr"$2,$3,$3+1,(min+rand()*(max-min+1))/100,$6,substr($5,2)}} else {if($6=="DEL") { print "chr"$2,$3+1,$3+length($4),1.0,$6} else {print "chr"$2,$3,$3+1,1.0,$6,substr($5,2)}}}' ${indel_rand} > ${indel_mut}
-    echo -e "${indel_mut} 에 저장되었습니다."
+    gawk -v OFS='\t' -v rseed=$RANDOM -v min=40 -v max=60 -F '\t' 'BEGIN{srand(rseed);} {gsub("Deletion","DEL",$6);gsub("Insertion","INS",$6);gsub("Duplication","INS",$6);if(rand()<0.6) {if($6=="DEL") {print "chr"$2,$3,$3+length($4)-1,(min+rand()*(max-min+1))/100,$6} else {print "chr"$2,$3,$3+1,(min+rand()*(max-min+1))/100,$6,substr($5,2)}} else {if($6=="DEL") { print "chr"$2,$3,$3+length($4)-1,1.0,$6} else {print "chr"$2,$3,$3+1,1.0,$6,substr($5,2)}}}' ${indel_rand} > ${indel_mut}
+    gawk -v OFS='\t' -F '\t' '{gsub(/^chr/,"")}1' ${indel_mut} > ${indel_mut_nochr}
+    echo -e "${indel_mut} 및 ${indel_mut_nochr} 에 저장되었습니다."
     echo -e "저장된 파일의 첫 5행:"
     head -n 5 ${indel_mut}
     echo
   else 
-    echo "${indel_mut} 파일이 존재합니다. 다음 단계로 넘어갑니다."
+    echo "${indel_mut} 및 ${indel_mut_nochr}파일이 존재합니다. 다음 단계로 넘어갑니다."
     return 0
   fi 
 }
 
 function mutagenesis() {
   echo -e "${GREEN}=====================================================================${DEFC}"
-  echo -e "${GREEN}>>>> BAM에 mutation을 주입합니다.${DEFC}"
+  echo -e "${GREEN}>>>> BAM에 mutation을 주입합니다 (Illumina).${DEFC}"
   echo -e "${GREEN}=====================================================================${DEFC}"
   echo -e "${GREEN}>>>> SNV Mutagenesis를 시작합니다.${DEFC}"
   if [ ! -e ${snv_sorted_bam} ]; then
@@ -213,6 +248,42 @@ function mutagenesis() {
   fi
 }
 
+function mutagenesis_ir() {
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  echo -e "${GREEN}>>>> BAM에 mutation을 주입합니다 (IonTorrent).${DEFC}"
+  echo -e "${GREEN}=====================================================================${DEFC}"
+  echo -e "${GREEN}>>>> SNV Mutagenesis를 시작합니다.${DEFC}"
+  if [ ! -e ${snv_sorted_bam_ir} ]; then
+    python3 bamsurgeon/bin/addsnv.py -p ${threads} --tmpdir workdir -v ${snv_mut_nochr} -f ${regional_bam_ir} -r ${reference_fa_ir} -o ${snv_bam_ir} --picardjar picard-tools-1.131/picard.jar --aligner tmap --vcf ${snv_vcf_ir} --force --insane --single
+    echo -e "${GREEN}>>>> Mutated BAM (SNV)을 정렬합니다.${DEFC}"
+    samtools sort -@${threads} -O BAM -o ${snv_sorted_bam_ir} ${snv_bam_ir}
+    echo -e "${GREEN}>>>> Mutated BAM (SNV)의 index를 생성합니다.${DEFC}"
+    samtools index -@${threads} ${snv_sorted_bam_ir}
+  else
+    echo -e "${snv_sorted_bam_ir}이 존재합니다. 다음 단계로 넘어갑니다."
+  fi
+
+  echo -e "${GREEN}>>>> INDEL Mutagenesis를 시작합니다.${DEFC}"
+  if [ ! -e ${final_bam_ir} ]; then
+    python3 bamsurgeon/bin/addindel.py -p ${threads} --tmpdir workdir -v ${indel_mut_nochr} -f ${snv_sorted_bam_ir} -r ${reference_fa_ir} -o ${indel_bam_ir} --picardjar picard-tools-1.131/picard.jar --aligner tmap --vcf ${indel_vcf_ir} --force --insane --single
+    echo -e "${GREEN}>>>> Mutated BAM (INDEL)을 정렬합니다.${DEFC}"
+    samtools sort -@${threads} -O BAM -o ${indel_sorted_bam_ir} ${indel_bam_ir}
+    echo -e "${GREEN}>>>> Mutated BAM (INDEL)의 index를 생성합니다.${DEFC}"
+    samtools index -@${threads} ${indel_sorted_bam_ir}
+    cp ${indel_sorted_bam_ir} ${final_bam_ir}
+    samtools index -@${threads} ${final_bam_ir}
+  else
+    echo -e "${final_bam_ir}이 존재합니다. 다음 단계로 넘어갑니다."
+  fi
+  echo -e "${GREEN}>>>> 생성된 BAM에서 variants를 calling합니다.${DEFC}"
+  if [ ! -e ${final_vcf_ir} ]; then
+    bcftools mpileup -a "AD,ADF,ADR,DP,SP,INFO/AD,INFO/ADF,INFO/ADR" -Ou -R ${bed_target_nochr} --threads ${threads} -f ${reference_fa_ir} ${final_bam_ir} | bcftools call -mv -Ov -o ${temp_vcf_ir} --ploidy GRCh37 --threads ${threads}
+    bcftools norm -c w -f ${reference_fa_ir} -m -any -Ov -o ${final_vcf_ir} --threads ${threads} ${temp_vcf_ir}
+  else
+    echo -e "${final_vcf_ir}이 존재합니다. 다음 단계로 넘어갑니다."
+  fi
+}
+
 function make_fastq() {
   echo -e "${GREEN}=====================================================================${DEFC}"
   echo -e "${GREEN}>>>> BAM을 fastq로 변환합니다.${DEFC}"
@@ -224,13 +295,17 @@ function make_fastq() {
   
   if [ -e ${fastq1} ] && [ -e ${fastq2} ]; then
     echo -e "${fastq1} 및 ${fastq2} 파일이 존재합니다. 건너뜁니다."
-    return 0
+  else
+    samtools fastq -@${threads} -1 ${fastq1} -2 ${fastq2} -0 /dev/null -n -F 0x900 ${final_bam}
   fi
 
-  samtools fastq -@${threads} -1 ${fastq1} -2 ${fastq2} -0 /dev/null -n -F 0x900 ${final_bam}
-  /usr/share/bbmap/repair.sh in1=${fastq1} in2=${fastq2} out1=${fastq1_repair} out2=${fastq2_repair} outs=${fastq_singleton} repair
-  gzip ${fastq1_repair}
-  gzip ${fastq2_repair}  
+  if [ -e ${fastq1_repair}.gz ] && [ -e ${fastq2_repair}.gz ]; then
+    echo -e "${fastq1_repair}.gz 및 ${fastq2_repair}.gz 파일이 존재합니다. 건너뜁니다."
+  else
+    /usr/share/bbmap/repair.sh in1=${fastq1} in2=${fastq2} out1=${fastq1_repair} out2=${fastq2_repair} outs=${fastq_singleton} repair
+    gzip ${fastq1_repair}
+    gzip ${fastq2_repair}  
+  fi
 }
 
 function make_screenshot() {
@@ -240,6 +315,11 @@ function make_screenshot() {
   
   if [ ! -e ${final_bam} ]; then
     echo -e "${RED}[오류] ${final_bam} 파일이 존재하지 않습니다.${DEFC}"
+    return -1
+  fi
+
+  if [ ! -e ${final_bam_ir} ]; then
+    echo -e "${RED}[오류] ${final_bam_ir} 파일이 존재하지 않습니다.${DEFC}"
     return -1
   fi
 
@@ -261,7 +341,7 @@ function make_screenshot() {
   cat ${snv_mut} ${indel_mut} | gawk -v OFS='\t' -F '\t' '{print $1,$2,$3}' > ${input_mut_bed}
   bedtools igv -path ${screenshot_path} -slop 50 -i ${input_mut_bed} > ${igv_batch}
   #echo -e "preference SAM.SHOW_CENTER_LINE true\nmaxPanelHeight -1\ngenome hg19\nload ${final_bam}\nload ${final_vcf}\nload ${snv_vcf}\nload ${indel_vcf}\n$(cat ${igv_batch})\nexit" > ${igv_batch}  
-  cat ${igv_session_template} | sed "s@##SNV_VCF##@${snv_vcf}@g" | sed "s@##INDEL_VCF##@${indel_vcf}@g" | sed "s@##FINAL_VCF##@${final_vcf}@g" | sed "s@##FINAL_BAM##@${final_bam}@g" > ${igv_session}
+  cat ${igv_session_template} | sed "s@##SNV_VCF##@${snv_vcf}@g" | sed "s@##INDEL_VCF##@${indel_vcf}@g" | sed "s@##FINAL_VCF##@${final_vcf}@g" | sed "s@##FINAL_BAM##@${final_bam}@g" | sed "s@##FINAL_BAM_IR##@${final_bam_ir}@g"> ${igv_session}
   echo -e "preference SAM.SHOW_CENTER_LINE true\nmaxPanelHeight -1\ngenome hg19\nload ${igv_session}\n$(cat ${igv_batch})\nexit" > ${igv_batch}
   if [ ! -e ${screenshot_path} ]; then
     mkdir -p ${screenshot_path}
@@ -273,8 +353,10 @@ function make_screenshot() {
 
 make_bed
 prepare_bam
+prepare_bam_ir
 prepare_pathogenic_variants_from_clinvar
 mutagenesis
+mutagenesis_ir
 make_fastq
 make_screenshot
 
